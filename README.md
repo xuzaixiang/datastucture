@@ -1,1 +1,1 @@
-# datastucture
+# algorithm
