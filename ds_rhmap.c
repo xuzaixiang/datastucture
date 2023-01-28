@@ -3,18 +3,26 @@
 //
 
 #include "ds_rhmap.h"
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
-static void *(*s_ds_rhmap_malloc)(size_t) = malloc;
-static void (*s_ds_rhmap_free)(void *) = free;
+static void *(*fn_malloc_s)(size_t) = malloc;
+static void (*fn_free_s)(void *) = free;
+void ds_rhmap_fn_alloc(void *(*malloc)(size_t)) {
+    assert(NULL != malloc);
+    fn_malloc_s = malloc;
+}
+void ds_rhmap_fn_free(void (*free)(void *)) {
+    assert(NULL != free);
+    fn_free_s = free;
+}
 
-typedef struct ds_rhmap_bucket {
+struct ds_rhmap_bucket {
     size_t hash;
     size_t dib;
-} ds_rhmap_bucket_t;
-
-typedef struct ds_rhmap {
+};
+struct ds_rhmap {
     size_t ksize;
     size_t vsize;
     size_t bucketsz;
@@ -31,37 +39,29 @@ typedef struct ds_rhmap {
 
     size_t (*hash)(const void *);
     int (*compare)(const void *, const void *, void *);
-} ds_rhmap_t;
-
-void ds_rhmap_set_alloc(void *(*malloc)(size_t)) { s_ds_rhmap_malloc = malloc; }
-void ds_rhmap_set_free(void (*free)(void *)) { s_ds_rhmap_free = free; }
-
+};
+typedef struct ds_rhmap_bucket ds_rhmap_bucket_t;
+typedef struct ds_rhmap ds_rhmap_t;
 static inline ds_rhmap_bucket_t *ds_rhmap_bucket_at(ds_rhmap_t *map, size_t index) {
     return (ds_rhmap_bucket_t *) (((char *) map->buckets) + (map->bucketsz * index));
 }
-
 static inline void *ds_rhmap_bucket_value(ds_rhmap_bucket_t *entry) {
     return ((char *) entry) + sizeof(ds_rhmap_bucket_t);
 }
-
 static inline size_t ds_rhmap_grow(size_t size) {
     return (size >> 2) * 3;// 0.75
 }
-
 static inline size_t ds_rhmap_shrink(size_t size) {
     return size / 10;// 0.1
 }
-
 static int ds_rhmap_resize(struct ds_rhmap *map, size_t new_cap) {
-    ds_rhmap_t *new_map = ds_rhmap_new(new_cap, map->ksize, map->vsize, map->hash, map->compare, map->udata);
+    ds_rhmap_t *new_map = ds_rhmap_new_cap(new_cap, map->ksize, map->vsize, map->hash, map->compare, map->udata);
     if (new_map == NULL)
         return -1;
     for (size_t i = 0; i < map->nbucket; ++i) {
         ds_rhmap_bucket_t *entry = ds_rhmap_bucket_at(map, i);
-        if (!entry->dib) {// null
-            continue;
-        }
-        entry->dib = 1;// default
+        if (0 == entry->dib) { continue; }// null
+        entry->dib = 1;                   // default
         size_t j = entry->hash & new_map->mask;
         for (;;) {
             ds_rhmap_bucket_t *bucket = ds_rhmap_bucket_at(new_map, j);
@@ -78,17 +78,35 @@ static int ds_rhmap_resize(struct ds_rhmap *map, size_t new_cap) {
             entry->dib += 1;
         }
     }
-    s_ds_rhmap_free(map->buckets);
+    fn_free_s(map->buckets);
     map->buckets = new_map->buckets;
     map->nbucket = new_map->nbucket;
     map->mask = new_map->mask;
     map->growat = new_map->growat;
     map->shrinkat = new_map->shrinkat;
-    s_ds_rhmap_free(new_map);
+    fn_free_s(new_map);
     return 0;
 }
+struct ds_rhmap *ds_rhmap_new(size_t ksize, size_t vsize, size_t (*hash)(const void *), int (*compare)(const void *, const void *, void *), void *udata) {
+    return ds_rhmap_new_cap(DS_RHMAP_CAPACITY, ksize, vsize, hash, compare, udata);
+}
+struct ds_rhmap *ds_rhmap_new_cap(size_t cap, size_t ksize, size_t vsize, size_t (*hash)(const void *), int (*compare)(const void *, const void *, void *), void *udata) {
+    size_t bucketsz = sizeof(ds_rhmap_bucket_t) + ksize + vsize;
+    // map + spare + edata
+    ds_rhmap_t *map = fn_malloc_s(sizeof(ds_rhmap_t) + (bucketsz << 1));
+    if (!map) {
+        return NULL;
+    }
+    memset(map, 0, sizeof(ds_rhmap_t));
+    map->bucketsz = bucketsz;
+    map->ksize = ksize;
+    map->vsize = vsize;
+    map->hash = hash;
+    map->compare = compare;
+    map->spare = ((char *) map) + sizeof(ds_rhmap_t);
+    map->edata = (char *) map->spare + bucketsz;
+    map->udata = udata;
 
-struct ds_rhmap *ds_rhmap_new(size_t cap, size_t ksize, size_t vsize, size_t (*hash)(const void *), int (*compare)(const void *, const void *, void *), void *udata) {
     size_t ncap = DS_RHMAP_CAPACITY;
     if (cap < ncap) {
         cap = ncap;
@@ -98,43 +116,27 @@ struct ds_rhmap *ds_rhmap_new(size_t cap, size_t ksize, size_t vsize, size_t (*h
         }
         cap = ncap;
     }
-    size_t bucketsz = sizeof(ds_rhmap_bucket_t) + ksize + vsize;
-
-    // map + spare + edata
-    ds_rhmap_t *map = s_ds_rhmap_malloc(sizeof(ds_rhmap_t) + (bucketsz << 1));
-    if (!map) {
-        return NULL;
-    }
-    memset(map, 0, sizeof(ds_rhmap_t));
-    map->hash = hash;
-    map->compare = compare;
-
     map->nbucket = cap;
     map->mask = map->nbucket - 1;
-    map->bucketsz = bucketsz;
-    map->ksize = ksize;
-    map->vsize = vsize;
     map->growat = ds_rhmap_grow(map->nbucket);
     map->shrinkat = ds_rhmap_shrink(map->nbucket);
-
-    map->spare = ((char *) map) + sizeof(ds_rhmap_t);
-    map->edata = (char *) map->spare + bucketsz;
-    map->udata = udata;
-    map->buckets = s_ds_rhmap_malloc(bucketsz * map->nbucket);
+    map->buckets = fn_malloc_s(bucketsz * map->nbucket);
     if (map->buckets == NULL) {
-        s_ds_rhmap_free(map);
+        fn_free_s(map);
         return NULL;
     }
     memset(map->buckets, 0, bucketsz * map->nbucket);
     return map;
 }
-
-void *ds_rhmap_set(struct ds_rhmap *map, void *key, void *value) {
-    if (value == NULL || key == NULL)
-        return NULL;
+int ds_rhmap_set(struct ds_rhmap *map, void *key, void *value) {
+    return ds_rhmap_set_with_old(map, key, value, NULL);
+}
+int ds_rhmap_set_with_old(struct ds_rhmap *map, void *key, void *value, void **old) {
+    assert(key != NULL);
+    assert(value != NULL);
     if (map->growat == map->count) {
         if (ds_rhmap_resize(map, map->nbucket << 1)) {
-            return NULL;
+            return -1;
         }
     }
     ds_rhmap_bucket_t *entry = map->edata;
@@ -148,12 +150,15 @@ void *ds_rhmap_set(struct ds_rhmap *map, void *key, void *value) {
         if (bucket->dib == 0) {
             memcpy(bucket, entry, map->bucketsz);
             map->count++;
-            return NULL;
+            return 0;
         }
         if (entry->hash == bucket->hash && map->compare(ds_rhmap_bucket_value(entry), ds_rhmap_bucket_value(bucket), map->udata) == 0) {
             memcpy(map->spare, ds_rhmap_bucket_value(bucket) + map->ksize, map->vsize);
             memcpy(ds_rhmap_bucket_value(bucket), ds_rhmap_bucket_value(entry), map->ksize + map->vsize);
-            return map->spare;
+            if (old != NULL && *old != NULL) {
+                *old = map->spare;
+            }
+            return 0;
         }
         if (bucket->dib < entry->dib) {
             memcpy(map->spare, bucket, map->bucketsz);
@@ -165,35 +170,34 @@ void *ds_rhmap_set(struct ds_rhmap *map, void *key, void *value) {
     }
 }
 void *ds_rhmap_get(struct ds_rhmap *map, void *key) {
-    if (NULL == key) return NULL;
+    assert(key != NULL);
     size_t hash = map->hash(key);
     size_t i = hash & map->mask;
     for (;;) {
         ds_rhmap_bucket_t *bucket = ds_rhmap_bucket_at(map, i);
-        if (0 == bucket->dib) return NULL;
+        if (0 == bucket->dib)
+            return NULL;
         if (hash == bucket->hash && map->compare(key, ds_rhmap_bucket_value(bucket), map->udata) == 0) {
             return ds_rhmap_bucket_value(bucket) + map->ksize;
         }
         i = (i + 1) & map->mask;
     }
 }
-size_t ds_rhmap_count(struct ds_rhmap *map) {
-    if (NULL == map) return -1;
-    return map->count;
-}
 void ds_rhmap_free(struct ds_rhmap **map) {
-    if (NULL == map || NULL == *map) return;
-    s_ds_rhmap_free((*map)->buckets);
-    s_ds_rhmap_free(*map);
+    assert(NULL != map);
+    assert(NULL != *map);
+    fn_free_s((*map)->buckets);
+    fn_free_s(*map);
     *map = NULL;
 }
 int ds_rhmap_clear(struct ds_rhmap *map) {
-    if (NULL == map) return -1;
+    assert(NULL != map);
     map->count = 0;
     if (map->nbucket != DS_RHMAP_CAPACITY) {
-        void *new_buckets = s_ds_rhmap_malloc(map->bucketsz * DS_RHMAP_CAPACITY);
-        if (!new_buckets) return -1;
-        s_ds_rhmap_free(map->buckets);
+        void *new_buckets = fn_malloc_s(map->bucketsz * DS_RHMAP_CAPACITY);
+        if (!new_buckets)
+            return -1;
+        fn_free_s(map->buckets);
         map->buckets = new_buckets;
         map->nbucket = DS_RHMAP_CAPACITY;
     }
@@ -201,15 +205,16 @@ int ds_rhmap_clear(struct ds_rhmap *map) {
     map->mask = map->nbucket - 1;
     map->growat = ds_rhmap_grow(map->nbucket);
     map->shrinkat = ds_rhmap_shrink(map->nbucket);
-    return 0;
 }
 void *ds_rhmap_delete(struct ds_rhmap *map, void *key) {
-    if (NULL == key || NULL == map) return NULL;
+    assert(map != NULL);
+    assert(key != NULL);
     size_t hash = map->hash(key);
     size_t i = hash & map->mask;
     for (;;) {
         ds_rhmap_bucket_t *bucket = ds_rhmap_bucket_at(map, i);
-        if (0 == bucket->dib) return NULL;
+        if (0 == bucket->dib)
+            return NULL;
         if (hash == bucket->hash && map->compare(key, ds_rhmap_bucket_value(bucket), map->udata) == 0) {
             memcpy(map->spare, ds_rhmap_bucket_value(bucket) + map->ksize, map->vsize);
             bucket->dib = 0;
@@ -233,12 +238,12 @@ void *ds_rhmap_delete(struct ds_rhmap *map, void *key) {
         i = (i + 1) & map->mask;
     }
 }
-int ds_rhmap_foreach(struct ds_rhmap *map, int (*foreach)(void *key, void *value, void *udata, void *sdata), void *sdata) {
+int ds_rhmap_foreach(struct ds_rhmap *map, int (*foreach)(void *key, void *value, void *udata)) {
     for (size_t i = 0; i < map->nbucket; i++) {
         ds_rhmap_bucket_t *bucket = ds_rhmap_bucket_at(map, i);
         if (bucket->dib) {
             void *item = ds_rhmap_bucket_value(bucket);
-            if (0 != foreach (item, (char *) item + map->ksize, map->udata, sdata)) {
+            if (0 != foreach (item, (char *) item + map->ksize, map->udata)) {
                 return -1;
             }
         }
